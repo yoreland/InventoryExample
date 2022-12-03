@@ -15,6 +15,7 @@
 package aws.example.inventory;
 
 //snippet-start:[athena.java2.StartQueryExample.import]
+import com.fasterxml.jackson.databind.util.JSONPObject;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.QueryExecutionContext;
@@ -31,7 +32,12 @@ import software.amazon.awssdk.services.athena.model.ColumnInfo;
 import software.amazon.awssdk.services.athena.model.Row;
 import software.amazon.awssdk.services.athena.model.Datum;
 import software.amazon.awssdk.services.athena.paginators.GetQueryResultsIterable;
+import software.amazon.awssdk.services.pricing.PricingClient;
+import software.amazon.awssdk.services.pricing.model.*;
+
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 //snippet-end:[athena.java2.StartQueryExample.import]
 
 public class StartQueryExample {
@@ -60,17 +66,58 @@ public class StartQueryExample {
             "    \"projection.dt.interval\" = \"1\"," +
             "    \"projection.dt.interval.unit\" = \"DAYS\"" +
             "  );";
+
+    private static final String COST_ANALYTICS_SQL_TEMPLATE = "select GB,storage_class, GB*price as cost, price from\n" +
+            "(select GB,storage_class, case %s else 0 end as price\n" +
+            "    from\n" +
+            "(select sum(size)/1073741824 as GB, storage_class from %s group by storage_class))";
     public static void main(String[] args) {
         // create inventory table
 //        createTable();
+//        execute("my_destination_bucket_name", "SELECT * FROM my_table_name limit 100");
+        execute("my_destination_bucket_name", generateSQLbyPrice("new1", COST_ANALYTICS_SQL_TEMPLATE, getS3Pricing()));
+    }
 
-        execute("yorelandivsserver", "select * from new limit 3");
+    private static String generateSQLbyPrice(String tableName, String costAnalyticsSqlTemplate, Map<String, Double> s3Pricing) {
+        StringBuffer buffer = new StringBuffer();
+        s3Pricing.keySet().forEach(key -> {
+            buffer.append(String.format("when storage_class='%s' then %f ", key, s3Pricing.get(key)));
+        });
+        return String.format(costAnalyticsSqlTemplate, buffer.toString(), tableName);
+    }
+
+    private static Map<String, Double> getS3Pricing(){
+        Map<String, Double> priceList = new HashMap<>();
+        PricingClient pricingClient = PricingClient.create();
+        pricingClient.getProducts(GetProductsRequest.builder()
+                        .serviceCode("AmazonS3")
+                        .filters(Filter.builder()
+                                .type(FilterType.TERM_MATCH)
+                                .field("productFamily").value("Storage")
+                                .build(),
+                                Filter.builder()
+                                .type(FilterType.TERM_MATCH)
+                                .field("regionCode").value("cn-north-1")
+                                .build())
+                .build()).priceList().stream()
+                .forEach(price -> insertPriceData(priceList, price));
+        return priceList;
+    }
+
+    private static void insertPriceData(Map<String, Double> priceList, String price) {
+        String key = ConvertStorageTag(price.split("\"volumeType\":\"")[1].split("\"")[0]);
+        String value = price.split("\"CNY\":\"")[1].split("\"")[0];
+        priceList.put(key, Double.valueOf(value));
+    }
+
+    private static String ConvertStorageTag(String s) {
+        return s.replaceAll(" ", "_").toUpperCase();
     }
 
     private static void createTable(){
-        String sourceBucket = "yoreland-demo";
-        String destBucket = "yorelandivsserver";
-        String prefix = "test";
+        String sourceBucket = "my_source_bucket_name";
+        String destBucket = "my_destination_bucket_name";
+        String prefix = "your_prefix";
         String startDate = "2022-11-28-00-00";
         execute(destBucket, String.format(CREATE_TABLE_SQL_TEMPLATE, "new", destBucket, sourceBucket, sourceBucket, prefix, startDate));
     }
